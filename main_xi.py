@@ -1,0 +1,349 @@
+__author__ = 'xuepeng'
+
+from tinyos.message import MoteIF
+from time import sleep
+from os.path import expanduser
+import os
+home = expanduser("~")
+current = os.path.dirname(os.path.abspath(__file__))
+from DSRC_JobProcessor import *
+from create import Create
+import sys, os
+import signal
+from multiprocessing import Process
+import multiprocessing
+
+from Queue import Queue
+
+# BEGIN: added by Xi
+import numpy as np
+# END: added by Xi
+
+import sys, datetime
+from time import sleep
+import tos
+
+AM_SERIAL_MSG = 0x89
+NUM_NODES = 9
+PADDING_SIZE = 106 - 2*NUM_NODES
+
+speed = None
+
+class SerialMsg(tos.Packet):
+    def __init__(self, packet = None):
+        tos.Packet.__init__(self,
+                            [('source',  'int', 2),
+                             ('num_msg', 'blob', NUM_NODES),
+                             ('total_msg', 'blob', NUM_NODES),
+                             ('power_level', 'int', 1),
+                             ('send_interval', 'int', 1),
+                             ('padding', 'blob', PADDING_SIZE)],
+                            packet)
+
+# BEGIN: added by Xi
+class ReturnValue(object):
+	def __init__(self,power,rate,X,P_pre):
+		self.power = power
+		self.rate = rate
+		self.X = X
+		self.P_pre = P_pre
+# END: added by Xi
+
+class PathJob:
+    def __init__(self, action, value):
+        self.action = action
+        self.value = value
+
+
+class PathMaintainer:
+    def __init__(self):
+        # read path
+        self.list = []
+
+    def add_job(self, job):
+        self.list.append(job)
+
+    def retrieve_one_second_job(self, speed):
+        if len(self.list) == 0:
+            return None, None, None
+        else:
+            path_job = self.list[0]
+            move_length = speed * 2
+            if path_job.action == 'w' or path_job.action == 'b':
+                if path_job.value <= move_length:
+                    time_to_go = path_job.value/float(speed)
+                    self.list.pop(0)
+                    return path_job.action, speed, time_to_go
+                else:
+                    path_job.value -= move_length
+                    return path_job.action, speed, 2.0
+            else:
+                rotation_speed = path_job.value/1.6
+                self.list.pop(0)
+                return path_job.action, rotation_speed, 1.6
+
+    def read_path(self, filename):
+        path_lines = open(filename, 'r')
+        for line in path_lines:
+            job_line = line.rstrip('\n')
+            action, value_str = job_line.split(',')
+            value = int(value_str)
+            job = PathJob(action, value)
+            self.add_job(job)
+
+
+class SpeedChangeRunner(JobCallback, Thread):
+    def __init__(self, robot_port, q):
+        Thread.__init__(self)
+        # Path
+        self.path_maintainer = PathMaintainer()
+        filename = current + "/" + "path.txt"
+        self.path_maintainer.read_path(filename)
+
+        # robot = Create(robot_port)
+        robot = None
+        # Job processor
+        self.job_processor = JobProcessor(robot)
+        self.queue = Queue()
+        self.q = q
+        self.start()
+
+    def run(self):
+        while True:
+            # print "Start"
+            job_speed = self.queue.get()
+            # print "Job speed"
+            action, speed, time_to_go = self.path_maintainer.retrieve_one_second_job(job_speed)
+            if action is None:
+                print "No job!"
+                pass
+            else:
+                if action == 'w':
+                    job = Job(self, 'go', time_to_go, speed, 0)
+                    self.job_processor.add_new_job(job)
+                elif action == 'b':
+                    job = Job(self, 'go', time_to_go, -speed, 0)
+                    self.job_processor.add_new_job(job)
+                elif action == 'r':
+                    job = Job(self, 'go', time_to_go, 0, -speed)
+                    self.job_processor.add_new_job(job)
+                elif action == 'l':
+                    job = Job(self, 'go', time_to_go, 0, speed)
+                    self.job_processor.add_new_job(job)
+
+    def signal_receiver(self, signum, stack):
+        speed = self.q.get()
+        if speed:
+            self.queue.put(speed)
+
+    def job_finished(self, action, arg1, arg2, timeExecuted):
+        pass
+        # print "Job finished: " + str(action) + ' ' + str(arg1) + ' ' + str(arg2) + ' ' + str(timeExecuted)
+
+    def job_paused(self, action, arg1, arg2, timeExecuted):
+        pass
+        # print "Job paused:" + str(action) + ' ' + str(arg1) + ' ' + str(arg2) + ' ' + str(timeExecuted)
+
+    def stop_self(self):
+        self.job_processor.stop_processor()
+
+class Mote:
+    def __init__(self, pid, q):
+        # self.mif = MoteIF.MoteIF()
+        # Create a MoteIF
+        # self.mif = MoteIF.MoteIF()
+        # Attach a source to it
+        # self.source = self.mif.addSource("sf@localhost:9002")
+        # SomeMessageClass.py would be generated by MIG
+        # self.mif.addListener(self, SerialMsg)
+        self.pid = pid
+        self.q = q
+        self.myargs = [None, 'serial@/dev/ttyUSB0:115200', '25']
+
+# BEGIN: added by Xi
+	self.tput_pre = 0
+	self.pdr_pre = 1.0
+	self.res_pre = ReturnValue(1,32.0,np.matrix([[1.0 for x in range(7)] for x in range(2)]),np.matrix(100*np.identity(7)))
+	self.FORGET_FAC = 0.95
+# END: added by Xi
+	
+# BEGIN: added by Xi
+    def cal_tput(self,arg0):
+	l = len(arg0)
+	n_neighbor = 0
+	n_packet = 0
+	for i in range(l):
+		if (arg0[i]!=0):
+			n_packet = n_packet + arg0[i]
+	    		n_neighbor = n_neighbor + 1
+	if (n_neighbor==0):
+		return 0;
+	else:
+		return (float(n_packet)/n_neighbor)
+# END: added by Xi
+	
+# BEGIN: added by Xi
+    def cal_PDR(self,arg0,arg1):
+	l = len(arg0)
+	n_recv_packet = 0
+	n_expt_packet = 0
+	vec_PDR = [0 for i in range(l)]
+	for i in range(l):
+		n_recv_packet = n_recv_packet + arg0[i]
+	    	n_expt_packet = n_expt_packet + arg1[i]
+	    	if (arg1[i]!=0):
+	    		vec_PDR[i] = float(arg0[i])/arg1[i]
+	if (n_expt_packet==0):
+		aver_PDR = 0.0
+	else:
+		aver_PDR = float(n_recv_packet)/n_expt_packet
+	return (aver_PDR)
+# END: added by Xi
+	
+# BEGIN: added by Xi
+    def PARC(self,para_pre,tput,pdr,tput_pre,pdr_pre):
+
+	##### RLS estimation #####
+
+	FORGET_FAC = 0.95
+	
+	rate_pre = para_pre.rate
+	power_pre = para_pre.power
+
+	X = np.matrix([[0.0 for x in range(7)] for x in range(2)])
+	X_pre = para_pre.X
+
+	#print X
+	#print X_pre
+
+	P_pre = np.matrix([[0.0 for x in range(7)] for x in range(7)])
+	P_pre_pre = para_pre.P_pre
+	
+	Y = np.matrix([tput,1.0])
+	Y = Y.getT()	
+
+	Phi_pre = np.matrix([0.0 for x in range(7)])
+	Phi_pre[0,0] = float(rate_pre)
+	Phi_pre[0,1] = float(power_pre)
+	Phi_pre[0,2] = 1.0
+	Phi_pre[0,3] = 1.0
+	Phi_pre[0,4] = 1.0
+	Phi_pre[0,5] = tput_pre
+	Phi_pre[0,6] = 1.0 # pdr_pre
+
+	Phi_pre = Phi_pre.getT()
+
+
+	Y_est = X_pre*Phi_pre
+	Epslon = Y-Y_est
+
+	temp = Phi_pre.getT()*P_pre_pre*Phi_pre
+	
+	X = X_pre + (Epslon*Phi_pre.getT()*P_pre_pre)/(FORGET_FAC+temp)
+	P_pre = P_pre_pre/FORGET_FAC - P_pre_pre*Phi_pre*Phi_pre.getT()*P_pre_pre/(FORGET_FAC*(1+temp))
+
+	record_result = ReturnValue(-1,-1,X,P_pre)
+
+	##### Find optimal combination #####
+
+	power_option = [1,2,3,5,31]
+	rate_option = [20, 25.0, 30.0, 35.0, 45.0, 55.0, 70.0]
+	
+	Phi = np.matrix([0.0 for x in range(7)])
+	Phi[0,2] = 1.0
+	Phi[0,3] = 1.0
+	Phi[0,4] = 1.0
+	Phi[0,5] = tput
+	Phi[0,6] = 1.0 # pdr
+	Phi = Phi.getT()
+
+	optm_tput = 0.0
+	optm_pdr = 0.0
+	Y_loop = np.matrix([0.0 for x in range(2)])
+	Y_loop = Y_loop.getT()
+	selected_rate = rate_pre
+	selected_power = power_pre
+
+	for loop_power in power_option:
+		for loop_rate in rate_option:
+			Phi[0,0] = 1/loop_rate
+			Phi[1,0] = loop_power
+			Y_loop = X*Phi
+			if (Y_loop[0]>optm_tput):
+				optm_tput = Y_loop[0]
+				selected_rate = loop_rate
+				selected_power = loop_power
+	record_result.power = selected_power
+	record_result.rate = selected_rate
+	return (record_result)
+# END: added by Xis
+
+    def run(self):
+        (_, serialPort, interval) = tuple(self.myargs)
+        interval = int(interval)
+        am = tos.AM(tos.getSource(serialPort))
+        while True:
+            # before_read = datetime.datetime.now()
+            p = am.read(timeout=2)
+            # print "read time: ", datetime.datetime.now() - before_read
+            if p and p.type == AM_SERIAL_MSG:
+                msg = SerialMsg(p.data)
+                print datetime.datetime.now()
+                print msg.source, msg.num_msg, msg.total_msg, msg.power_level, msg.send_interval
+                # BEGIN: added by Xi
+	        tput_cur = self.cal_tput(msg.num_msg)
+	        pdr_cur = self.cal_PDR(msg.num_msg,msg.total_msg)
+	        res = self.PARC(self.res_pre,tput_cur,pdr_cur,self.tput_pre,self.pdr_pre)
+                # END: added by Xi
+
+                self.q.put(30)
+                os.kill(self.pid, signal.SIGUSR1)
+	        print int(res.power)
+	        print int(res.rate)
+                power = int(res.power)
+                interval = int(res.rate)
+
+                self.tput_pre = tput_cur	
+	        self.pdr_pre = pdr_cur
+	        self.res_pre = res
+                
+                to_mote = SerialMsg((0,[0]*NUM_NODES,[0]*NUM_NODES,power,interval,[0]*PADDING_SIZE))
+                # before_write = datetime.datetime.now()
+                try:
+                    am.write(to_mote, AM_SERIAL_MSG, timeout=0.5)
+                except Exception, e:
+                    try:
+                        am.write(to_mote, AM_SERIAL_MSG, timeout=0.5)
+                    except Exception, e:
+                        pass
+                # print  "write time:", datetime.datetime.now() - before_write
+                sleep(0.1)
+
+def robot_func(robot_port,q):
+    runner = SpeedChangeRunner(robot_port, q)
+    signal.signal(signal.SIGUSR1, runner.signal_receiver)
+    while True:
+        pass
+
+def mote_func(pid,q):
+    mote = Mote(pid,q)
+    mote.run()
+
+if __name__ == '__main__':
+    print "Start"
+    args = sys.argv
+    if len(args) < 2:
+        print "need a robot port name!"
+        exit()
+    robot_port = args[1]
+    q = multiprocessing.Queue()
+    p1 = Process(target=robot_func, args=(robot_port,q,))
+    p1.start()
+    time.sleep(0.5)
+    p2 = Process(target=mote_func, args=(p1.pid,q,))
+    p2.start()
+
+    raw_input("Enter to stop!")
+    exit()
+
+
